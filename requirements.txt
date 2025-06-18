@@ -1,0 +1,8 @@
+python-telegram-bot==20.6
+requests
+supabase-py==2.2.0
+python-dotenv
+python-binance
+ccxt
+pymysql
+pycoingecko
