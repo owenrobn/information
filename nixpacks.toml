@@ -2,7 +2,10 @@
 nixPkgs = ["python310", "gcc", "openssl"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = [
+  "pip cache purge",
+  "pip install --no-cache-dir -r requirements.txt"
+]
 
 [start]
 cmd = "python telegram_bot.py"
