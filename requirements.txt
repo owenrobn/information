@@ -1,8 +1,8 @@
 python-telegram-bot==20.7
 supabase==2.3.4
 requests==2.31.0
-python-dotenv
-python-binance
-ccxt
-pymysql
-pycoingecko
+python-dotenv==1.0.0
+pymysql==1.1.0
+ccxt==4.1.0
+python-binance==1.0.19
+pycoingecko==3.1.0
