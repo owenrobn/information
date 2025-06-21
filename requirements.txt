@@ -1,6 +1,6 @@
-python-telegram-bot==20.6
+python-telegram-bot
 requests
-supabase-py==2.2.0
+supabase
 python-dotenv
 python-binance
 ccxt
