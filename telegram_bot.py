@@ -1,714 +1,443 @@
 import logging
 import asyncio
-import requests
 import os
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from supabase import create_client, Client
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from dotenv import load_dotenv
+
+
+print("Current working directory:", os.getcwd())
+print("Files in directory:", os.listdir('.'))
+
+# Try to load .env file
+result = load_dotenv()
+print("load_dotenv() result:", result)
 
 # ================== CONFIG ===================
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://kxvheefpdeqtaklcqikp.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt4dmhlZWZwZGVxdGFrbGNxaWtwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk5MTM3MzQsImV4cCI6MjA2NTQ4OTczNH0.JEx0LcIAdBJYiDBuCOQdOiyzhiHvkcIV-PBxGDKQZPw")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7631419865:AAFSJK9A7FNbQL5BRwujVm89C_RVg0wTYI4")
-ADMIN_IDS = [6685099030]  # Replace with your Telegram ID
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_IDS = [6685099030]
+
+# Validate required environment variables
+if not all([SUPABASE_URL, SUPABASE_KEY, BOT_TOKEN]):
+    print("❌ Missing required environment variables:")
+    if not SUPABASE_URL: print("  - SUPABASE_URL")
+    if not SUPABASE_KEY: print("  - SUPABASE_KEY")
+    if not BOT_TOKEN: print("  - BOT_TOKEN")
+    exit(1)
 
 print("🚀 Starting Crypto Bot...")
-print("📡 Connecting to Supabase...")
+print(f"📡 Connecting to Supabase: {SUPABASE_URL[:50]}...")
 
 # ================== SUPABASE INIT ===================
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+try:
+    from supabase import create_client, Client
+    
+    # Clean and validate URL
+    if not SUPABASE_URL.startswith(('http://', 'https://')):
+        SUPABASE_URL = 'https://' + SUPABASE_URL
+    
+    # Remove any trailing slashes or extra characters
+    SUPABASE_URL = SUPABASE_URL.rstrip('/')
+    
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase client created successfully")
+    
+except Exception as e:
+    print(f"❌ Supabase initialization failed: {e}")
+    print("🔄 Running without database - using in-memory storage")
+    supabase = None
+
+# ================== IN-MEMORY STORAGE (FALLBACK) ===================
+user_data = {
+    'alerts': {},      # user_id: [{'symbol': 'BTC', 'price': 45000, 'type': 'single'}]
+    'watchlists': {},  # user_id: ['BTC', 'ETH']
+    'api_keys': {},    # user_id: {'binance': {'key': 'xxx', 'secret': 'yyy'}}
+    'sessions': {}     # user_id: {'username': 'xxx', 'last_active': datetime}
+}
 
 # ================== DATABASE FUNCTIONS ===================
-def test_supabase_connection():
-    """Test Supabase connection and verify tables exist"""
+def test_connection():
+    """Test database connection"""
+    if not supabase:
+        return False
     try:
-        # Test connection by trying to query a table
-        response = supabase.table("user_alerts").select("*").limit(1).execute()
-        print("✅ Supabase connection successful")
+        supabase.table("user_alerts").select("*").limit(1).execute()
         return True
     except Exception as e:
-        print(f"❌ Supabase connection failed: {e}")
-        print("\n💡 Make sure you have created the required tables in your Supabase dashboard.")
-        print("📋 Required tables: user_alerts, user_watchlist, api_keys, user_sessions")
+        print(f"❌ Database test failed: {e}")
         return False
 
-def get_table_creation_sql():
-    """Return SQL commands for creating required tables"""
-    return """
--- Create user_alerts table
-CREATE TABLE IF NOT EXISTS user_alerts (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    alert_type TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    price DECIMAL(20,8),
-    min_price DECIMAL(20,8),
-    max_price DECIMAL(20,8),
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Create user_watchlist table
-CREATE TABLE IF NOT EXISTS user_watchlist (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    symbol TEXT NOT NULL,
-    added_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, symbol)
-);
-
--- Create api_keys table
-CREATE TABLE IF NOT EXISTS api_keys (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    exchange TEXT NOT NULL,
-    api_key TEXT NOT NULL,
-    api_secret TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, exchange)
-);
-
--- Create user_sessions table for tracking users
-CREATE TABLE IF NOT EXISTS user_sessions (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT UNIQUE NOT NULL,
-    username TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Create indexes for better performance
-CREATE INDEX IF NOT EXISTS idx_user_alerts_user_id ON user_alerts(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_watchlist_user_id ON user_watchlist(user_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
-"""
-
-def log_user_activity(user_id, username=None, first_name=None, last_name=None):
-    """Log user activity to Supabase"""
+def safe_db_operation(operation, fallback_operation=None):
+    """Safely execute database operation with fallback"""
     try:
-        # Insert or update user session
+        if supabase:
+            return operation()
+        elif fallback_operation:
+            return fallback_operation()
+        return False
+    except Exception as e:
+        print(f"Database error: {e}")
+        if fallback_operation:
+            return fallback_operation()
+        return False
+
+def log_user_activity(user_id, username=None, first_name=None):
+    """Log user activity"""
+    def db_op():
         supabase.table("user_sessions").upsert({
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
-            "last_name": last_name,
             "last_active": datetime.now().isoformat()
         }).execute()
-        logger.info(f"User activity logged for user {user_id}")
-    except Exception as e:
-        logger.error(f"Error logging user activity: {e}")
+        return True
+    
+    def fallback_op():
+        user_data['sessions'][user_id] = {
+            'username': username,
+            'first_name': first_name,
+            'last_active': datetime.now()
+        }
+        return True
+    
+    return safe_db_operation(db_op, fallback_op)
 
 def get_user_alerts(user_id):
-    """Get user's active alerts from Supabase"""
-    try:
+    """Get user alerts"""
+    def db_op():
         response = supabase.table("user_alerts").select("*").eq("user_id", user_id).eq("is_active", True).execute()
         return response.data
-    except Exception as e:
-        logger.error(f"Error getting user alerts: {e}")
-        return []
+    
+    def fallback_op():
+        return user_data['alerts'].get(user_id, [])
+    
+    return safe_db_operation(db_op, fallback_op) or []
 
 def add_user_alert(user_id, symbol, price=None, min_price=None, max_price=None):
-    """Add price alert for user to Supabase"""
-    try:
+    """Add user alert"""
+    def db_op():
         alert_data = {
             "user_id": user_id,
             "symbol": symbol.upper(),
             "alert_type": "price_range" if min_price and max_price else "single_price"
         }
+        if price: alert_data["price"] = float(price)
+        if min_price: alert_data["min_price"] = float(min_price)
+        if max_price: alert_data["max_price"] = float(max_price)
         
-        if price:
-            alert_data["price"] = float(price)
-        if min_price:
-            alert_data["min_price"] = float(min_price)
-        if max_price:
-            alert_data["max_price"] = float(max_price)
-            
-        response = supabase.table("user_alerts").insert(alert_data).execute()
-        logger.info(f"Alert added for user {user_id}: {symbol}")
+        supabase.table("user_alerts").insert(alert_data).execute()
         return True
-    except Exception as e:
-        logger.error(f"Error adding user alert: {e}")
-        return False
+    
+    def fallback_op():
+        if user_id not in user_data['alerts']:
+            user_data['alerts'][user_id] = []
+        
+        alert = {'symbol': symbol.upper(), 'type': 'range' if min_price and max_price else 'single'}
+        if price: alert['price'] = float(price)
+        if min_price: alert['min_price'] = float(min_price)
+        if max_price: alert['max_price'] = float(max_price)
+        
+        user_data['alerts'][user_id].append(alert)
+        return True
+    
+    return safe_db_operation(db_op, fallback_op)
 
 def remove_user_alerts(user_id, symbol):
-    """Remove alerts for a specific symbol"""
-    try:
+    """Remove user alerts for symbol"""
+    def db_op():
         supabase.table("user_alerts").update({"is_active": False}).eq("user_id", user_id).eq("symbol", symbol.upper()).execute()
-        logger.info(f"Alerts removed for user {user_id}: {symbol}")
         return True
-    except Exception as e:
-        logger.error(f"Error removing user alerts: {e}")
-        return False
+    
+    def fallback_op():
+        if user_id in user_data['alerts']:
+            user_data['alerts'][user_id] = [
+                alert for alert in user_data['alerts'][user_id] 
+                if alert['symbol'] != symbol.upper()
+            ]
+        return True
+    
+    return safe_db_operation(db_op, fallback_op)
 
 def get_user_watchlist(user_id):
-    """Get user's watchlist from Supabase"""
-    try:
-        response = supabase.table("user_watchlist").select("*").eq("user_id", user_id).execute()
+    """Get user watchlist"""
+    def db_op():
+        response = supabase.table("user_watchlist").select("symbol").eq("user_id", user_id).execute()
         return [item["symbol"] for item in response.data]
-    except Exception as e:
-        logger.error(f"Error getting user watchlist: {e}")
-        return []
+    
+    def fallback_op():
+        return user_data['watchlists'].get(user_id, [])
+    
+    return safe_db_operation(db_op, fallback_op) or []
 
 def add_to_watchlist(user_id, symbols):
-    """Add symbols to user's watchlist in Supabase"""
-    try:
+    """Add symbols to watchlist"""
+    def db_op():
         for symbol in symbols:
             supabase.table("user_watchlist").upsert({
                 "user_id": user_id,
                 "symbol": symbol.upper()
             }).execute()
-        logger.info(f"Added to watchlist for user {user_id}: {symbols}")
         return True
-    except Exception as e:
-        logger.error(f"Error adding to watchlist: {e}")
-        return False
+    
+    def fallback_op():
+        if user_id not in user_data['watchlists']:
+            user_data['watchlists'][user_id] = []
+        
+        for symbol in symbols:
+            symbol = symbol.upper()
+            if symbol not in user_data['watchlists'][user_id]:
+                user_data['watchlists'][user_id].append(symbol)
+        return True
+    
+    return safe_db_operation(db_op, fallback_op)
 
 def remove_from_watchlist(user_id, symbol):
-    """Remove symbol from user's watchlist"""
-    try:
+    """Remove symbol from watchlist"""
+    def db_op():
         supabase.table("user_watchlist").delete().eq("user_id", user_id).eq("symbol", symbol.upper()).execute()
-        logger.info(f"Removed from watchlist for user {user_id}: {symbol}")
         return True
-    except Exception as e:
-        logger.error(f"Error removing from watchlist: {e}")
-        return False
-
-def store_api_keys(user_id, exchange, api_key, api_secret):
-    """Store user's API keys (encrypted in production)"""
-    try:
-        # In production, encrypt api_key and api_secret before storing
-        supabase.table("api_keys").upsert({
-            "user_id": user_id,
-            "exchange": exchange.lower(),
-            "api_key": api_key,  # Should be encrypted
-            "api_secret": api_secret  # Should be encrypted
-        }).execute()
-        logger.info(f"API keys stored for user {user_id}: {exchange}")
+    
+    def fallback_op():
+        if user_id in user_data['watchlists']:
+            try:
+                user_data['watchlists'][user_id].remove(symbol.upper())
+            except ValueError:
+                pass
         return True
-    except Exception as e:
-        logger.error(f"Error storing API keys: {e}")
-        return False
+    
+    return safe_db_operation(db_op, fallback_op)
 
-def get_user_api_keys(user_id):
-    """Get user's stored API keys"""
-    try:
-        response = supabase.table("api_keys").select("exchange").eq("user_id", user_id).execute()
-        return [item["exchange"] for item in response.data]
-    except Exception as e:
-        logger.error(f"Error getting user API keys: {e}")
-        return []
-
-# ================== LOGGER ===================
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# ================== BOT SETUP ===================
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ================== BOT COMMANDS ===================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command - show main menu"""
+    """Start command"""
     user = update.effective_user
-    user_name = user.first_name
-    
-    # Log user activity to Supabase
-    log_user_activity(user.id, user.username, user.first_name, user.last_name)
+    log_user_activity(user.id, user.username, user.first_name)
     
     keyboard = [
-        [InlineKeyboardButton("📊 Price Check", callback_data="price_menu"),
-         InlineKeyboardButton("🚀 Top Gainers/Losers", callback_data="top_menu")],
-        [InlineKeyboardButton("🔔 Price Alerts", callback_data="alert_menu"),
-         InlineKeyboardButton("🧠 Auto Trade Demo", callback_data="demo_trade_menu")],
-        [InlineKeyboardButton("💼 Portfolio", callback_data="portfolio_menu"),
-         InlineKeyboardButton("📈 Charts", callback_data="chart_menu")],
-        [InlineKeyboardButton("🔐 API Keys", callback_data="apikey_menu"),
-         InlineKeyboardButton("📋 Watchlist", callback_data="watchlist_menu")],
+        [InlineKeyboardButton("📊 Prices", callback_data="price_help"),
+         InlineKeyboardButton("🔔 Alerts", callback_data="alert_help")],
+        [InlineKeyboardButton("📋 Watchlist", callback_data="watch_help"),
+         InlineKeyboardButton("💼 Portfolio", callback_data="portfolio_help")],
+        [InlineKeyboardButton("🛠 Admin", callback_data="admin_panel") if user.id in ADMIN_IDS else InlineKeyboardButton("❓ Help", callback_data="general_help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    welcome_text = f"🤖 Welcome {user_name}!\n\n" \
-                   "Your personal Crypto Trading Assistant is ready.\n" \
-                   "Choose an option below to get started:"
-    
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    await update.message.reply_text(
+        f"🤖 Welcome {user.first_name}!\n\nYour Crypto Trading Assistant is ready.\nChoose an option below:",
+        reply_markup=reply_markup
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command"""
-    help_text = """
-🤖 **Crypto Bot Commands:**
+    help_text = """🤖 **Crypto Bot Commands:**
 
-📊 **Price Commands:**
-• `/price BTC ETH` - Get current prices
-• `/price BTCUSDT` - Get specific pair price
+**Alerts:**
+• `/alert BTC 45000` - Single price alert
+• `/alert BTC 45000 50000` - Range alert
+• `/alerts` - View alerts
+• `/removealert BTC` - Remove alerts
 
-🔔 **Alert Commands:**
-• `/alert BTC 45000 50000` - Set price range alerts
-• `/alert ETH 3000` - Set single price alert
-• `/alerts` - View your active alerts
-• `/removealert BTC` - Remove alerts for a coin
+**Watchlist:**
+• `/watchlist` - View watchlist
+• `/addwatch BTC ETH` - Add coins
+• `/removewatch BTC` - Remove coin
 
-💼 **Portfolio Commands:**
-• `/portfolio` - View your portfolio
-• `/balance` - Check balances
-
-🔐 **API Commands:**
-• `/setapikey binance YOUR_KEY YOUR_SECRET` - Set exchange API keys
-• `/viewkeys` - View configured exchanges
-
-📋 **Watchlist Commands:**
-• `/watchlist` - View your watchlist
-• `/addwatch BTC ETH` - Add coins to watchlist
-• `/removewatch BTC` - Remove from watchlist
-
-🚀 **Market Commands:**
-• `/topgainers` - Top gaining coins
-• `/toplosers` - Top losing coins
-
-Type `/start` to return to the main menu.
-    """
+**Info:**
+• `/status` - Bot status
+• `/start` - Main menu"""
+    
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set price alert"""
     if not context.args:
-        await update.message.reply_text(
-            "Please specify alert parameters.\n\n"
-            "Examples:\n"
-            "• `/alert BTC 45000` - Single price alert\n"
-            "• `/alert ETH 3000 4000` - Price range alert",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("Usage: `/alert BTC 45000` or `/alert BTC 45000 50000`", parse_mode='Markdown')
         return
-    
-    user_id = update.effective_user.id
     
     if len(context.args) < 2:
         await update.message.reply_text("❌ Please provide symbol and price(s)")
         return
     
+    user_id = update.effective_user.id
     symbol = context.args[0].upper()
     
     try:
         if len(context.args) == 2:
-            # Single price alert
             price = float(context.args[1])
             if add_user_alert(user_id, symbol, price=price):
-                await update.message.reply_text(f"✅ Price alert set for {symbol} at ${price:,.2f}")
+                await update.message.reply_text(f"✅ Alert set: {symbol} at ${price:,.2f}")
             else:
-                await update.message.reply_text("❌ Error setting alert. Please try again.")
+                await update.message.reply_text("❌ Error setting alert")
         
         elif len(context.args) == 3:
-            # Price range alert
-            min_price = float(context.args[1])
-            max_price = float(context.args[2])
+            min_price, max_price = float(context.args[1]), float(context.args[2])
             if min_price >= max_price:
                 await update.message.reply_text("❌ Min price must be lower than max price")
                 return
                 
             if add_user_alert(user_id, symbol, min_price=min_price, max_price=max_price):
-                await update.message.reply_text(f"✅ Price range alert set for {symbol}: ${min_price:,.2f} - ${max_price:,.2f}")
+                await update.message.reply_text(f"✅ Range alert set: {symbol} ${min_price:,.2f} - ${max_price:,.2f}")
             else:
-                await update.message.reply_text("❌ Error setting alert. Please try again.")
+                await update.message.reply_text("❌ Error setting alert")
                 
     except ValueError:
-        await update.message.reply_text("❌ Invalid price format. Please use numbers only.")
+        await update.message.reply_text("❌ Invalid price format")
 
 async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View user's active alerts"""
+    """View alerts"""
     user_id = update.effective_user.id
     alerts = get_user_alerts(user_id)
     
     if not alerts:
-        await update.message.reply_text("🔔 You have no active price alerts.\n\nUse `/alert BTC 45000` to set one!", parse_mode='Markdown')
+        await update.message.reply_text("🔔 No active alerts. Use `/alert BTC 45000` to set one!", parse_mode='Markdown')
         return
     
-    alert_text = "🔔 **Your Active Alerts:**\n\n"
+    alert_text = "🔔 **Your Alerts:**\n\n"
     for alert in alerts:
-        symbol = alert['symbol']
-        if alert['alert_type'] == 'single_price':
-            alert_text += f"• {symbol}: ${alert['price']:,.2f}\n"
+        symbol = alert.get('symbol', alert.get('symbol'))
+        if alert.get('type') == 'single' or alert.get('alert_type') == 'single_price':
+            price = alert.get('price')
+            alert_text += f"• {symbol}: ${price:,.2f}\n"
         else:
-            alert_text += f"• {symbol}: ${alert['min_price']:,.2f} - ${alert['max_price']:,.2f}\n"
+            min_p = alert.get('min_price')
+            max_p = alert.get('max_price')
+            alert_text += f"• {symbol}: ${min_p:,.2f} - ${max_p:,.2f}\n"
     
     await update.message.reply_text(alert_text, parse_mode='Markdown')
 
 async def removealert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove alerts for a specific symbol"""
+    """Remove alerts"""
     if not context.args:
-        await update.message.reply_text("Please specify the symbol.\nExample: `/removealert BTC`", parse_mode='Markdown')
+        await update.message.reply_text("Usage: `/removealert BTC`", parse_mode='Markdown')
         return
     
     user_id = update.effective_user.id
     symbol = context.args[0].upper()
     
     if remove_user_alerts(user_id, symbol):
-        await update.message.reply_text(f"✅ All alerts removed for {symbol}")
+        await update.message.reply_text(f"✅ Alerts removed for {symbol}")
     else:
-        await update.message.reply_text("❌ Error removing alerts. Please try again.")
+        await update.message.reply_text("❌ Error removing alerts")
 
 async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View user's watchlist"""
+    """View watchlist"""
     user_id = update.effective_user.id
     watchlist = get_user_watchlist(user_id)
     
     if not watchlist:
-        await update.message.reply_text("📋 Your watchlist is empty.\n\nUse `/addwatch BTC ETH` to add coins!", parse_mode='Markdown')
+        await update.message.reply_text("📋 Watchlist empty. Use `/addwatch BTC ETH`!", parse_mode='Markdown')
         return
     
-    watchlist_text = "📋 **Your Watchlist:**\n\n" + "\n".join([f"• {symbol}" for symbol in watchlist])
-    await update.message.reply_text(watchlist_text, parse_mode='Markdown')
+    text = "📋 **Your Watchlist:**\n\n" + "\n".join([f"• {symbol}" for symbol in watchlist])
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 async def addwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add coins to watchlist"""
+    """Add to watchlist"""
     if not context.args:
-        await update.message.reply_text("Please specify coins to add.\nExample: `/addwatch BTC ETH SOL`", parse_mode='Markdown')
+        await update.message.reply_text("Usage: `/addwatch BTC ETH SOL`", parse_mode='Markdown')
         return
     
     user_id = update.effective_user.id
     symbols = [arg.upper() for arg in context.args]
     
     if add_to_watchlist(user_id, symbols):
-        await update.message.reply_text(f"✅ Added {', '.join(symbols)} to your watchlist!")
+        await update.message.reply_text(f"✅ Added {', '.join(symbols)} to watchlist!")
     else:
-        await update.message.reply_text("❌ Error adding coins to watchlist. Please try again.")
+        await update.message.reply_text("❌ Error adding to watchlist")
 
 async def removewatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove coin from watchlist"""
+    """Remove from watchlist"""
     if not context.args:
-        await update.message.reply_text("Please specify the coin to remove.\nExample: `/removewatch BTC`", parse_mode='Markdown')
+        await update.message.reply_text("Usage: `/removewatch BTC`", parse_mode='Markdown')
         return
     
     user_id = update.effective_user.id
     symbol = context.args[0].upper()
     
     if remove_from_watchlist(user_id, symbol):
-        await update.message.reply_text(f"✅ Removed {symbol} from your watchlist")
+        await update.message.reply_text(f"✅ Removed {symbol} from watchlist")
     else:
-        await update.message.reply_text("❌ Error removing coin from watchlist. Please try again.")
+        await update.message.reply_text("❌ Error removing from watchlist")
 
-async def setapikey_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set API keys for exchanges"""
-    if len(context.args) < 3:
-        await update.message.reply_text(
-            "Please provide exchange, API key, and secret.\n\n"
-            "Example: `/setapikey binance YOUR_API_KEY YOUR_SECRET`\n\n"
-            "⚠️ **Security Warning:** Only use this command in private messages!",
-            parse_mode='Markdown'
-        )
-        return
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot status"""
+    db_status = "✅ Connected" if supabase and test_connection() else "❌ Using memory storage"
     
-    # Delete the user's message for security
-    try:
-        await update.message.delete()
-    except:
-        pass
-    
-    user_id = update.effective_user.id
-    exchange = context.args[0].lower()
-    api_key = context.args[1]
-    api_secret = context.args[2]
-    
-    if store_api_keys(user_id, exchange, api_key, api_secret):
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ API keys for {exchange.title()} have been stored securely.\n\n"
-                 "⚠️ Your original message has been deleted for security."
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="❌ Error storing API keys. Please try again."
-        )
+    status_text = f"""🤖 **Bot Status:**
 
-async def viewkeys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View configured exchanges"""
-    user_id = update.effective_user.id
-    exchanges = get_user_api_keys(user_id)
-    
-    if not exchanges:
-        await update.message.reply_text("🔐 No API keys configured.\n\nUse `/setapikey` to add exchange keys.", parse_mode='Markdown')
-        return
-    
-    keys_text = "🔐 **Configured Exchanges:**\n\n" + "\n".join([f"• {exchange.title()}" for exchange in exchanges])
-    await update.message.reply_text(keys_text, parse_mode='Markdown')
+Database: {db_status}
+Storage: {'Supabase' if supabase else 'In-Memory'}
+Status: 🟢 Online
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin panel - only for authorized users"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ Access denied. Admin privileges required.")
-        return
-        
-    keyboard = [
-        [InlineKeyboardButton("📊 Bot Statistics", callback_data="admin_stats")],
-        [InlineKeyboardButton("📋 Database Info", callback_data="admin_db_info")],
-        [InlineKeyboardButton("🔄 Test Connection", callback_data="admin_test_connection")],
-        [InlineKeyboardButton("📥 Broadcast Message", callback_data="admin_broadcast")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+Users tracked: {len(user_data['sessions'])}
+Total alerts: {sum(len(alerts) for alerts in user_data['alerts'].values())}
+Total watchlists: {sum(len(wl) for wl in user_data['watchlists'].values())}"""
     
-    await update.message.reply_text("🛠 **Admin Control Panel**\nSelect an action:", 
-                                   reply_markup=reply_markup, parse_mode='Markdown')
+    await update.message.reply_text(status_text, parse_mode='Markdown')
 
 # ================== CALLBACK HANDLERS ===================
-async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show bot statistics"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.callback_query.answer("Access denied")
-        return
-        
-    await update.callback_query.answer()
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard callbacks"""
+    query = update.callback_query
+    await query.answer()
     
-    try:
-        # Get user count
-        users_response = supabase.table("user_sessions").select("id").execute()
-        user_count = len(users_response.data)
-        
-        # Get alerts count
-        alerts_response = supabase.table("user_alerts").select("id").eq("is_active", True).execute()
-        alerts_count = len(alerts_response.data)
-        
-        # Get watchlist entries count
-        watchlist_response = supabase.table("user_watchlist").select("id").execute()
-        watchlist_count = len(watchlist_response.data)
-        
-        # Get API keys count
-        apikeys_response = supabase.table("api_keys").select("id").execute()
-        apikeys_count = len(apikeys_response.data)
-        
-        stats_text = f"""
-📊 **Bot Statistics:**
-
-👥 Total Users: {user_count}
-🔔 Active Alerts: {alerts_count}
-📋 Watchlist Entries: {watchlist_count}
-🔐 API Keys Stored: {apikeys_count}
-
-Database: ✅ Supabase Connected
-Status: 🟢 Online
-        """
-        
-        await update.callback_query.message.reply_text(stats_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        await update.callback_query.message.reply_text(f"❌ Error getting stats: {e}")
-
-async def admin_test_connection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test Supabase connection"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.callback_query.answer("Access denied")
-        return
-        
-    await update.callback_query.answer()
+    help_texts = {
+        "price_help": "📊 **Price Commands:**\n\n• `/price BTC ETH` - Get prices\n• Coming soon: Live price tracking",
+        "alert_help": "🔔 **Alert Commands:**\n\n• `/alert BTC 45000` - Single alert\n• `/alert BTC 45000 50000` - Range alert\n• `/alerts` - View alerts\n• `/removealert BTC` - Remove alerts",
+        "watch_help": "📋 **Watchlist Commands:**\n\n• `/watchlist` - View list\n• `/addwatch BTC ETH` - Add coins\n• `/removewatch BTC` - Remove coin",
+        "portfolio_help": "💼 **Portfolio:**\n\nComing soon:\n• Portfolio tracking\n• P&L analysis\n• Exchange integration",
+        "general_help": "❓ **Help:**\n\nUse `/help` for all commands\nUse `/status` for bot status\nUse `/start` for main menu",
+        "admin_panel": "🛠 **Admin Panel:**\n\nDatabase status checked.\nUse `/status` for details." if update.effective_user.id in ADMIN_IDS else "❌ Access denied"
+    }
     
-    if test_supabase_connection():
-        await update.callback_query.message.reply_text("✅ Supabase connection is working perfectly!")
-    else:
-        await update.callback_query.message.reply_text("❌ Supabase connection failed. Check your configuration.")
+    text = help_texts.get(query.data, "Unknown option")
+    await query.message.reply_text(text, parse_mode='Markdown')
 
-async def admin_db_info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show database setup information"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.callback_query.answer("Access denied")
-        return
-        
-    await update.callback_query.answer()
-    
-    info_text = """
-🗄️ **Database Setup Information:**
-
-**Supabase Tables:**
-• user_alerts - Price alerts storage
-• user_watchlist - User watchlists
-• api_keys - Exchange API keys (encrypted)
-• user_sessions - User tracking
-
-**Setup Status:**
-✅ Using Supabase (PostgreSQL)
-✅ Real-time capabilities
-✅ Secure API key storage
-✅ Auto-scaling database
-
-**Performance:**
-• Indexed queries for fast lookups
-• Optimized for concurrent users
-• Automatic backups enabled
-
-All tables are properly configured and indexed.
-    """
-    
-    await update.callback_query.message.reply_text(info_text, parse_mode='Markdown')
-
-# Menu handlers
-async def price_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle price menu callback"""
-    await update.callback_query.answer()
-    help_text = """
-📊 **Price Check Commands:**
-
-• `/price BTC` - Get Bitcoin price
-• `/price ETH BTC ADA` - Get multiple prices
-• `/price BTCUSDT` - Get trading pair price
-
-**Examples:**
-• `/price bitcoin ethereum`
-• `/price BTC ETH SOL DOGE`
-
-Just type the command with coin symbols!
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def top_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle top gainers/losers menu"""
-    await update.callback_query.answer()
-    help_text = """
-🚀 **Market Movers:**
-
-• `/topgainers` - Top 10 gaining coins today
-• `/toplosers` - Top 10 losing coins today
-• `/trending` - Trending coins
-
-Get real-time market movement data!
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def alert_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle alerts menu"""
-    await update.callback_query.answer()
-    help_text = """
-🔔 **Price Alert System:**
-
-• `/alert BTC 45000 50000` - Set price range alert
-• `/alert ETH 3000` - Set single price alert
-• `/alerts` - View your active alerts
-• `/removealert BTC` - Remove alerts for a coin
-
-**How it works:**
-Set alerts and get notified when prices hit your targets!
-Alerts are stored securely in Supabase.
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def demo_trade_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle demo trading menu"""
-    await update.callback_query.answer()
-    help_text = """
-🧠 **Auto Trade Demo (Coming Soon):**
-
-Features in development:
-• Paper trading simulation
-• Automated trading signals
-• Strategy backtesting
-• Risk management tools
-
-Stay tuned for updates! 🚀
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def portfolio_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle portfolio menu"""
-    await update.callback_query.answer()
-    help_text = """
-💼 **Portfolio Management:**
-
-• `/portfolio` - View your portfolio
-• `/balance` - Check exchange balances
-• `/setapikey` - Configure exchange APIs
-• `/viewkeys` - View configured exchanges
-
-**Note:** Connect your exchange API keys first!
-All keys are stored securely in encrypted Supabase storage.
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def chart_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle charts menu"""
-    await update.callback_query.answer()
-    help_text = """
-📈 **Chart Analysis (Coming Soon):**
-
-Planned features:
-• Live price charts
-• Technical indicators
-• Support/resistance levels
-• Volume analysis
-
-Charts feature is under development! 📊
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def apikey_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle API keys menu"""
-    await update.callback_query.answer()
-    help_text = """
-🔐 **Exchange API Management:**
-
-• `/setapikey binance YOUR_API YOUR_SECRET` - Add Binance keys
-• `/setapikey coinbase YOUR_API YOUR_SECRET` - Add Coinbase keys
-• `/viewkeys` - View configured exchanges
-
-**Security Features:**
-• Keys are encrypted before storage
-• Stored securely in Supabase
-• Never logged in plain text
-• Auto-deletion of setup messages
-
-⚠️ **Never share your API keys with anyone!**
-Only use read-only or trading permissions as needed.
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-async def watchlist_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle watchlist menu"""
-    await update.callback_query.answer()
-    help_text = """
-📋 **Watchlist Management:**
-
-• `/watchlist` - View your watchlist
-• `/addwatch BTC ETH SOL` - Add coins to watchlist
-• `/removewatch BTC` - Remove from watchlist
-
-**Features:**
-• Unlimited watchlist entries
-• Persistent storage in Supabase
-• Quick price checks for watched coins
-
-Track your favorite cryptocurrencies easily!
-    """
-    await update.callback_query.message.reply_text(help_text, parse_mode='Markdown')
-
-# ================== ERROR HANDLER ===================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log errors and notify user"""
-    logger.error(f"Exception while handling an update: {context.error}")
-    
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    logger.error(f"Error: {context.error}")
     if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text(
-            "⚠️ An error occurred while processing your request. Please try again later."
-        )
+        await update.effective_message.reply_text("⚠️ An error occurred. Please try again.")
 
-# ================== MAIN APPLICATION ===================
+# ================== MAIN ===================
 def main():
     """Start the bot"""
-    print("🔧 Initializing Supabase Crypto Bot...")
+    print("🔧 Initializing bot...")
     
-    # Test Supabase connection
-    if not test_supabase_connection():
-        print("\n📋 SQL commands to create tables:")
-        print(get_table_creation_sql())
-        print("\n💡 Copy the above SQL and run it in your Supabase SQL Editor to create the required tables.")
-        print("🔄 After creating tables, restart the bot.")
-        return
+    # Test database if available
+    if supabase:
+        if test_connection():
+            print("✅ Database connection verified")
+        else:
+            print("⚠️ Database test failed - using memory storage")
+    else:
+        print("⚠️ Running with in-memory storage only")
     
-    print("✅ Supabase connection verified!")
-    
-    # Create application
+    # Create bot application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Add command handlers
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("alert", alert_command))
+    app.add_handler(CommandHandler("alerts", alerts_command))
+    app.add_handler(CommandHandler("removealert", removealert_command))
+    app.add_handler(CommandHandler("watchlist", watchlist_command))
+    app.add_handler(CommandHandler("addwatch", addwatch_command))
+    app.add_handler(CommandHandler("removewatch", removewatch_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_error_handler(error_handler)
+    
+    print("🚀 Bot starting...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
