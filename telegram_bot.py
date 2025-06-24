@@ -4,24 +4,20 @@ import os
 import aiohttp
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Config
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = [6685099030]
 
-# Validate required environment variables
 if not all([SUPABASE_URL, SUPABASE_KEY, BOT_TOKEN]):
     print("❌ Missing environment variables")
     exit(1)
 
-# Initialize Supabase
 try:
     from supabase import create_client, Client
     if not SUPABASE_URL.startswith(('http://', 'https://')):
@@ -32,10 +28,8 @@ except Exception as e:
     print(f"❌ Supabase failed: {e}")
     supabase = None
 
-# In-memory storage fallback
-user_data = {'alerts': {}, 'watchlists': {}, 'portfolios': {}, 'sessions': {}}
+user_data = {'alerts': {}, 'watchlists': {}, 'portfolios': {}, 'sessions': {}, 'demo_accounts': {}}
 
-# Crypto symbol mapping for API
 SYMBOL_MAP = {
     'BTC': 'bitcoin', 'ETH': 'ethereum', 'BNB': 'binancecoin', 'SOL': 'solana',
     'ADA': 'cardano', 'DOT': 'polkadot', 'LINK': 'chainlink', 'MATIC': 'matic-network',
@@ -43,12 +37,12 @@ SYMBOL_MAP = {
     'XRP': 'ripple', 'DOGE': 'dogecoin', 'SHIB': 'shiba-inu'
 }
 
-# API Functions
+import json
+
 async def get_crypto_prices(symbols):
     try:
         coin_ids = [SYMBOL_MAP.get(s.upper(), s.lower()) for s in symbols]
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(coin_ids)}&vs_currencies=usd&include_24hr_change=true"
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 if response.status == 200:
@@ -74,7 +68,6 @@ async def get_market_overview():
     except:
         return None
 
-# Database operations with fallback
 def safe_db_op(db_op, fallback_op):
     try:
         return db_op() if supabase else fallback_op()
@@ -182,313 +175,575 @@ def add_to_portfolio(user_id, symbol, amount, price):
         return True
     return safe_db_op(db_op, fallback_op)
 
-# Bot setup
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Demo Account Management Functions
+def create_demo_account(user_id, starting_balance=10000.0):
+    """Create a new demo account with starting balance"""
+    def db_op():
+        # Check if account exists
+        existing = supabase.table("demo_accounts").select("*").eq("user_id", user_id).execute()
+        if not existing.data:
+            supabase.table("demo_accounts").insert({
+                "user_id": user_id,
+                "balance": starting_balance,
+                "total_invested": 0.0,
+                "total_profit_loss": 0.0,
+                "created_at": datetime.now().isoformat()
+            }).execute()
+        return True
+    
+    def fallback_op():
+        if user_id not in user_data['demo_accounts']:
+            user_data['demo_accounts'][user_id] = {
+                'balance': starting_balance,
+                'total_invested': 0.0,
+                'total_profit_loss': 0.0,
+                'transactions': [],
+                'created_at': datetime.now()
+            }
+        return True
+    
+    return safe_db_op(db_op, fallback_op)
 
-# Commands
+def get_demo_account(user_id):
+    """Get demo account info"""
+    def db_op():
+        result = supabase.table("demo_accounts").select("*").eq("user_id", user_id).execute()
+        return result.data[0] if result.data else None
+    
+    def fallback_op():
+        return user_data['demo_accounts'].get(user_id)
+    
+    account = safe_db_op(db_op, fallback_op)
+    if not account:
+        create_demo_account(user_id)
+        return get_demo_account(user_id)
+    return account
+
+def update_demo_balance(user_id, new_balance, total_invested=None):
+    """Update demo account balance"""
+    def db_op():
+        update_data = {"balance": new_balance}
+        if total_invested is not None:
+            update_data["total_invested"] = total_invested
+        supabase.table("demo_accounts").update(update_data).eq("user_id", user_id).execute()
+        return True
+    
+    def fallback_op():
+        if user_id in user_data['demo_accounts']:
+            user_data['demo_accounts'][user_id]['balance'] = new_balance
+            if total_invested is not None:
+                user_data['demo_accounts'][user_id]['total_invested'] = total_invested
+        return True
+    
+    return safe_db_op(db_op, fallback_op)
+
+def add_transaction(user_id, transaction_type, symbol, amount, price, total_cost):
+    """Add transaction to history"""
+    def db_op():
+        supabase.table("demo_transactions").insert({
+            "user_id": user_id,
+            "transaction_type": transaction_type,  # 'buy' or 'sell'
+            "symbol": symbol,
+            "amount": amount,
+            "price": price,
+            "total_cost": total_cost,
+            "timestamp": datetime.now().isoformat()
+        }).execute()
+        return True
+    
+    def fallback_op():
+        if user_id not in user_data['demo_accounts']:
+            create_demo_account(user_id)
+        if 'transactions' not in user_data['demo_accounts'][user_id]:
+            user_data['demo_accounts'][user_id]['transactions'] = []
+        
+        user_data['demo_accounts'][user_id]['transactions'].append({
+            'type': transaction_type,
+            'symbol': symbol,
+            'amount': amount,
+            'price': price,
+            'total_cost': total_cost,
+            'timestamp': datetime.now()
+        })
+        return True
+    
+    return safe_db_op(db_op, fallback_op)
+
+def get_transaction_history(user_id, limit=10):
+    """Get recent transaction history"""
+    def db_op():
+        result = supabase.table("demo_transactions").select("*").eq("user_id", user_id).order("timestamp", desc=True).limit(limit).execute()
+        return result.data
+    
+    def fallback_op():
+        account = user_data['demo_accounts'].get(user_id, {})
+        transactions = account.get('transactions', [])
+        return sorted(transactions, key=lambda x: x['timestamp'], reverse=True)[:limit]
+    
+    return safe_db_op(db_op, fallback_op) or []
+
+def reset_demo_account(user_id, starting_balance=10000.0):
+    """Reset demo account to starting balance"""
+    def db_op():
+        # Reset account
+        supabase.table("demo_accounts").update({
+            "balance": starting_balance,
+            "total_invested": 0.0,
+            "total_profit_loss": 0.0
+        }).eq("user_id", user_id).execute()
+        
+        # Clear portfolio
+        supabase.table("user_portfolio").delete().eq("user_id", user_id).execute()
+        
+        # Archive old transactions (mark as inactive instead of deleting)
+        supabase.table("demo_transactions").update({"is_active": False}).eq("user_id", user_id).execute()
+        return True
+    
+    def fallback_op():
+        user_data['demo_accounts'][user_id] = {
+            'balance': starting_balance,
+            'total_invested': 0.0,
+            'total_profit_loss': 0.0,
+            'transactions': [],
+            'created_at': datetime.now()
+        }
+        if user_id in user_data['portfolios']:
+            user_data['portfolios'][user_id] = {}
+        return True
+    
+    return safe_db_op(db_op, fallback_op)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user_activity(user.id, user.username, user.first_name)
-    
     keyboard = [
         [InlineKeyboardButton("📊 Prices", callback_data="price_help"), InlineKeyboardButton("🔔 Alerts", callback_data="alert_help")],
         [InlineKeyboardButton("📋 Watchlist", callback_data="watch_help"), InlineKeyboardButton("💼 Portfolio", callback_data="portfolio_help")],
         [InlineKeyboardButton("🛠 Admin", callback_data="admin_panel") if user.id in ADMIN_IDS else InlineKeyboardButton("❓ Help", callback_data="general_help")]
     ]
-    
-    await update.message.reply_text(f"🤖 Welcome {user.first_name}!\n\nYour Crypto Trading Assistant is ready.\nChoose an option below:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        f"🤖 Welcome {user.first_name}!\nYour Crypto Trading Assistant is ready.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def topgainers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                top = sorted(data, key=lambda x: x['price_change_percentage_24h'], reverse=True)[:5]
+                msg = "🚀 Top Gainers (24h):\n"
+                for coin in top:
+                    msg += f"{coin['symbol'].upper()}: ${coin['current_price']} ({coin['price_change_percentage_24h']:.2f}%)\n"
+                await update.message.reply_text(msg)
+    except:
+        await update.message.reply_text("Failed to fetch top gainers.")
+
+async def toplosers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                worst = sorted(data, key=lambda x: x['price_change_percentage_24h'])[:5]
+                msg = "📉 Top Losers (24h):\n"
+                for coin in worst:
+                    msg += f"{coin['symbol'].upper()}: ${coin['current_price']} ({coin['price_change_percentage_24h']:.2f}%)\n"
+                await update.message.reply_text(msg)
+    except:
+        await update.message.reply_text("Failed to fetch top losers.")
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """🤖 **Crypto Bot Commands:**
+    await update.message.reply_text("Use /price BTC ETH to check prices. Use /portfolio to track holdings. Use /alert to set price alerts.")
 
-**Prices:** `/price BTC ETH` • `/market` • `/top10`
-**Alerts:** `/alert BTC 45000` • `/alerts` • `/removealert BTC`
-**Watchlist:** `/watchlist` • `/addwatch BTC ETH` • `/removewatch BTC`
-**Portfolio:** `/portfolio` • `/addholding BTC 0.5 45000` • `/pnl`
-**Info:** `/status` • `/start`"""
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: `/price BTC ETH SOL`", parse_mode='Markdown')
-        return
-    
-    symbols = [arg.upper() for arg in context.args[:10]]
-    await update.message.reply_text("🔄 Fetching prices...")
-    prices = await get_crypto_prices(symbols)
-    
-    if not prices:
-        await update.message.reply_text("❌ Unable to fetch prices.")
-        return
-    
-    price_text = "📊 **Current Prices:**\n\n"
-    for symbol in symbols:
-        if symbol in prices:
-            price_data = prices[symbol]
-            change_emoji = "🟢" if price_data['change_24h'] >= 0 else "🔴"
-            price_text += f"{change_emoji} **{symbol}**: ${price_data['price']:,.2f} ({price_data['change_24h']:+.2f}%)\n"
-        else:
-            price_text += f"❌ **{symbol}**: Price not found\n"
-    
-    await update.message.reply_text(price_text, parse_mode='Markdown')
-
-async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Fetching market data...")
-    market_data = await get_market_overview()
-    
-    if not market_data:
-        await update.message.reply_text("❌ Unable to fetch market data.")
-        return
-    
-    market_text = f"""📈 **Market Overview:**
-💰 **Total Market Cap**: ${market_data['total_market_cap']:,.0f}
-📊 **24h Volume**: ${market_data['total_volume']:,.0f}
-📉 **Market Cap Change**: {market_data['market_cap_change_24h']:+.2f}%
-₿ **BTC Dominance**: {market_data['btc_dominance']:.1f}%"""
-    
-    await update.message.reply_text(market_text, parse_mode='Markdown')
-
-async def top10_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    top_coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'AVAX', 'DOT', 'LINK', 'MATIC']
-    await update.message.reply_text("🔄 Fetching top 10...")
-    prices = await get_crypto_prices(top_coins)
-    
-    if not prices:
-        await update.message.reply_text("❌ Unable to fetch data.")
-        return
-    
-    top_text = "🏆 **Top 10 Cryptocurrencies:**\n\n"
-    for i, symbol in enumerate(top_coins, 1):
-        if symbol in prices:
-            price_data = prices[symbol]
-            change_emoji = "🟢" if price_data['change_24h'] >= 0 else "🔴"
-            top_text += f"{i}. {change_emoji} **{symbol}**: ${price_data['price']:,.2f} ({price_data['change_24h']:+.2f}%)\n"
-    
-    await update.message.reply_text(top_text, parse_mode='Markdown')
-
-async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    portfolio = get_user_portfolio(user_id)
-    
-    if not portfolio:
-        await update.message.reply_text("💼 Portfolio empty. Use `/addholding BTC 0.5 45000`!", parse_mode='Markdown')
-        return
-    
-    symbols = list(portfolio.keys())
-    current_prices = await get_crypto_prices(symbols)
-    
-    portfolio_text = "💼 **Your Portfolio:**\n\n"
-    total_value = total_cost = 0
-    
-    for symbol, holding in portfolio.items():
-        amount, avg_price = holding['amount'], holding['avg_price']
-        cost_basis = amount * avg_price
-        
-        if symbol in current_prices:
-            current_price = current_prices[symbol]['price']
-            current_value = amount * current_price
-            pnl = current_value - cost_basis
-            pnl_percent = (pnl / cost_basis) * 100
-            
-            total_value += current_value
-            total_cost += cost_basis
-            
-            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-            portfolio_text += f"{pnl_emoji} **{symbol}**: {amount:.6f} | ${current_value:,.2f} | P&L: ${pnl:+,.2f} ({pnl_percent:+.2f}%)\n"
-    
-    if total_cost > 0:
-        total_pnl = total_value - total_cost
-        total_pnl_percent = (total_pnl / total_cost) * 100
-        total_emoji = "🟢" if total_pnl >= 0 else "🔴"
-        portfolio_text += f"\n📊 **Total:** {total_emoji} ${total_value:,.2f} | P&L: ${total_pnl:+,.2f} ({total_pnl_percent:+.2f}%)"
-    
-    await update.message.reply_text(portfolio_text, parse_mode='Markdown')
-
-async def addholding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 3:
-        await update.message.reply_text("Usage: `/addholding BTC 0.5 45000`", parse_mode='Markdown')
-        return
-    
-    try:
-        symbol, amount, price = context.args[0].upper(), float(context.args[1]), float(context.args[2])
-        if amount <= 0 or price <= 0:
-            await update.message.reply_text("❌ Amount and price must be positive")
-            return
-        
-        if add_to_portfolio(update.effective_user.id, symbol, amount, price):
-            await update.message.reply_text(f"✅ Added {amount} {symbol} at ${price:,.2f}")
-        else:
-            await update.message.reply_text("❌ Error adding to portfolio")
-    except ValueError:
-        await update.message.reply_text("❌ Invalid number format")
-
-async def pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    portfolio = get_user_portfolio(update.effective_user.id)
-    if not portfolio:
-        await update.message.reply_text("💼 No portfolio data")
-        return
-    
-    current_prices = await get_crypto_prices(list(portfolio.keys()))
-    winners, losers = [], []
-    
-    for symbol, holding in portfolio.items():
-        if symbol in current_prices:
-            amount, avg_price = holding['amount'], holding['avg_price']
-            current_price = current_prices[symbol]['price']
-            pnl = (amount * current_price) - (amount * avg_price)
-            pnl_percent = (pnl / (amount * avg_price)) * 100
-            
-            (winners if pnl >= 0 else losers).append((symbol, pnl, pnl_percent))
-    
-    pnl_text = "📊 **P&L Analysis:**\n\n"
-    if winners:
-        pnl_text += "🟢 **Winners:**\n" + "\n".join([f"• {s}: +${p:,.2f} (+{pp:.2f}%)" for s, p, pp in sorted(winners, key=lambda x: x[1], reverse=True)]) + "\n\n"
-    if losers:
-        pnl_text += "🔴 **Losers:**\n" + "\n".join([f"• {s}: ${p:,.2f} ({pp:.2f}%)" for s, p, pp in sorted(losers, key=lambda x: x[1])]) + "\n\n"
-    
-    total_pnl = sum([p for _, p, _ in winners + losers])
-    pnl_text += f"{'🟢' if total_pnl >= 0 else '🔴'} **Total P&L**: ${total_pnl:+,.2f}"
-    
-    await update.message.reply_text(pnl_text, parse_mode='Markdown')
-
-async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: `/alert BTC 45000` or `/alert BTC 45000 50000`", parse_mode='Markdown')
-        return
-    
-    user_id, symbol = update.effective_user.id, context.args[0].upper()
-    
-    try:
-        if len(context.args) == 2:
-            price = float(context.args[1])
-            if add_user_alert(user_id, symbol, price=price):
-                await update.message.reply_text(f"✅ Alert set: {symbol} at ${price:,.2f}")
-        elif len(context.args) == 3:
-            min_price, max_price = float(context.args[1]), float(context.args[2])
-            if min_price >= max_price:
-                await update.message.reply_text("❌ Min price must be lower than max")
-                return
-            if add_user_alert(user_id, symbol, min_price=min_price, max_price=max_price):
-                await update.message.reply_text(f"✅ Range alert: {symbol} ${min_price:,.2f} - ${max_price:,.2f}")
-    except ValueError:
-        await update.message.reply_text("❌ Invalid price format")
-
-async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    alerts = get_user_alerts(update.effective_user.id)
-    if not alerts:
-        await update.message.reply_text("🔔 No alerts. Use `/alert BTC 45000`!", parse_mode='Markdown')
-        return
-    
-    alert_text = "🔔 **Your Alerts:**\n\n"
-    for alert in alerts:
-        symbol = alert.get('symbol')
-        if alert.get('type') == 'single' or alert.get('alert_type') == 'single_price':
-            alert_text += f"• {symbol}: ${alert.get('price'):,.2f}\n"
-        else:
-            alert_text += f"• {symbol}: ${alert.get('min_price'):,.2f} - ${alert.get('max_price'):,.2f}\n"
-    
-    await update.message.reply_text(alert_text, parse_mode='Markdown')
-
-async def removealert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: `/removealert BTC`", parse_mode='Markdown')
-        return
-    
-    symbol = context.args[0].upper()
-    if remove_user_alerts(update.effective_user.id, symbol):
-        await update.message.reply_text(f"✅ Alerts removed for {symbol}")
-
-async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    watchlist = get_user_watchlist(update.effective_user.id)
-    if not watchlist:
-        await update.message.reply_text("📋 Watchlist empty. Use `/addwatch BTC ETH`!", parse_mode='Markdown')
-        return
-    
-    # Get prices for watchlist
-    prices = await get_crypto_prices(watchlist)
-    text = "📋 **Your Watchlist:**\n\n"
-    
-    for symbol in watchlist:
-        if symbol in prices:
-            price_data = prices[symbol]
-            change_emoji = "🟢" if price_data['change_24h'] >= 0 else "🔴"
-            text += f"{change_emoji} **{symbol}**: ${price_data['price']:,.2f} ({price_data['change_24h']:+.2f}%)\n"
-        else:
-            text += f"• {symbol}: Price unavailable\n"
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def addwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: `/addwatch BTC ETH SOL`", parse_mode='Markdown')
-        return
-    
-    symbols = [arg.upper() for arg in context.args]
-    if add_to_watchlist(update.effective_user.id, symbols):
-        await update.message.reply_text(f"✅ Added {', '.join(symbols)} to watchlist!")
-
-async def removewatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: `/removewatch BTC`", parse_mode='Markdown')
-        return
-    
-    symbol = context.args[0].upper()
-    if remove_from_watchlist(update.effective_user.id, symbol):
-        await update.message.reply_text(f"✅ Removed {symbol} from watchlist")
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db_status = "✅ Connected" if supabase else "❌ Memory storage"
-    status_text = f"""🤖 **Bot Status:**
-Database: {db_status}
-Users: {len(user_data['sessions'])}
-Alerts: {sum(len(alerts) for alerts in user_data['alerts'].values())}
-Watchlists: {sum(len(wl) for wl in user_data['watchlists'].values())}"""
-    await update.message.reply_text(status_text, parse_mode='Markdown')
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❓ Unknown command. Use /help.")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data
     
-    help_texts = {
-        "price_help": "📊 **Price Commands:**\n• `/price BTC ETH` - Get current prices\n• `/market` - Market overview\n• `/top10` - Top 10 cryptocurrencies",
-        "alert_help": "🔔 **Alert Commands:**\n• `/alert BTC 45000` - Single price alert\n• `/alert BTC 45000 50000` - Range alert\n• `/alerts` - View all alerts\n• `/removealert BTC` - Remove alerts",
-        "watch_help": "📋 **Watchlist Commands:**\n• `/watchlist` - View watchlist with prices\n• `/addwatch BTC ETH` - Add coins to watchlist\n• `/removewatch BTC` - Remove coin from watchlist",
-        "portfolio_help": "💼 **Portfolio Commands:**\n• `/portfolio` - View portfolio with P&L\n• `/addholding BTC 0.5 45000` - Add holding\n• `/pnl` - Detailed P&L analysis",
-        "general_help": "❓ **Help:**\nUse `/help` for all commands\nUse `/status` for bot status\nUse `/start` for main menu",
-        "admin_panel": "🛠 **Admin Panel:**\nDatabase status checked.\nUse `/status` for details." if update.effective_user.id in ADMIN_IDS else "❌ Access denied"
-    }
-    
-    await query.message.reply_text(help_texts.get(query.data, "Unknown option"), parse_mode='Markdown')
+    if data == "price_help":
+        await query.edit_message_text("Use /price BTC ETH to check prices.")
+    elif data == "alert_help":
+        await query.edit_message_text("Use /alert BTC 50000 or /alert BTC 45000 55000 to set alerts.")
+    elif data == "watch_help":
+        await query.edit_message_text("Use /watchlist to see coins. /addwatch BTC to add.")
+    elif data == "portfolio_help":
+        await query.edit_message_text(
+            "*Demo Trading Commands:*\n"
+            "/balance - View account summary\n"
+            "/buy BTC 0.1 30000 - Buy crypto\n"
+            "/sell BTC 0.1 32000 - Sell crypto\n"
+            "/portfolio - View holdings\n"
+            "/pnl - Profit/Loss analysis\n"
+            "/history - Transaction history\n"
+            "/resetdemo - Reset demo account"
+        )
+    elif data == "admin_panel":
+        await query.edit_message_text("Admin Panel: coming soon.")
+    elif data == "general_help":
+        await query.edit_message_text(
+            "*Available Commands:*\n"
+            "/help - Show this help\n"
+            "/price BTC ETH - Check prices\n"
+            "/balance - Demo account status\n"
+            "/buy - Buy crypto (demo)\n"
+            "/sell - Sell crypto (demo)\n"
+            "/topgainers - Top gaining coins\n"
+            "/toplosers - Top losing coins\n"
+            "/chart BTC - Simple price chart"
+        )
+    elif data.startswith("reset_confirm_"):
+        user_id = int(data.split("_")[2])
+        if user_id == query.from_user.id:  # Security check
+            reset_demo_account(user_id)
+            await query.edit_message_text(
+                "✅ *DEMO ACCOUNT RESET SUCCESSFUL*\n\n"
+                "💰 Balance: $10,000.00\n"
+                "📊 Portfolio: Empty\n"
+                "📋 Transactions: Archived\n\n"
+                "🚀 Ready to start trading! Use /buy to make your first trade."
+            )
+        else:
+            await query.edit_message_text("❌ Unauthorized reset attempt.")
+    elif data == "reset_cancel":
+        await query.edit_message_text("❌ Demo account reset cancelled.")
+
+async def background_alert_scanner(app):
+    import time
+    await asyncio.sleep(5)
+    while True:
+        try:
+            url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        for coin in data:
+                            change = coin.get("price_change_percentage_24h", 0)
+                            symbol = coin['symbol'].upper()
+                            if change >= 10:
+                                msg = f"🚀 Pump Alert: {symbol} is up {change:.2f}% in 24h!"
+                            elif change <= -10:
+                                msg = f"💥 Dump Alert: {symbol} is down {change:.2f}% in 24h!"
+                            else:
+                                continue
+                            for user_id in user_data['sessions']:
+                                try:
+                                    await app.bot.send_message(chat_id=user_id, text=msg)
+                                except:
+                                    pass
+            await asyncio.sleep(600)
+        except Exception as e:
+            print("Alert scanner error:", e)
+            await asyncio.sleep(600)
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logging.getLogger(__name__).error(f"Error: {context.error}")
+    logging.getLogger(_name_).error(f"Error: {context.error}")
     if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text("⚠️ An error occurred. Please try again.")
+        await update.effective_message.reply_text("⚠ An error occurred.")
 
-def main():
-    logging.getLogger(__name__).info("🚀 Starting Crypto Bot...")
+async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /chart BTC")
+        return
+    symbol = context.args[0].upper()
+    chart_url = f"https://quickchart.io/chart?c={{type:'line',data:{{labels:['1h','2h','3h','4h','5h','6h'],datasets:[{{label:'{symbol}',data:[100,102,104,103,105,107]}}]}}}}"
+    await update.message.reply_photo(photo=chart_url, caption=f"Mini Chart for {symbol}")
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage: /buy BTC 0.1 30000")
+        return
     
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    try:
+        user_id = update.effective_user.id
+        symbol = context.args[0].upper()
+        amount = float(context.args[1])
+        price = float(context.args[2])
+        total_cost = amount * price
+        
+        # Get demo account
+        account = get_demo_account(user_id)
+        current_balance = account['balance'] if account else 0
+        
+        # Check if user has enough balance
+        if current_balance < total_cost:
+            await update.message.reply_text(
+                f"❌ Insufficient balance!\n"
+                f"💰 Current balance: ${current_balance:,.2f}\n"
+                f"💸 Required: ${total_cost:,.2f}\n"
+                f"📊 Use /balance to check your demo account"
+            )
+            return
+        
+        # Execute the trade
+        add_to_portfolio(user_id, symbol, amount, price)
+        new_balance = current_balance - total_cost
+        total_invested = account.get('total_invested', 0) + total_cost
+        update_demo_balance(user_id, new_balance, total_invested)
+        add_transaction(user_id, 'buy', symbol, amount, price, total_cost)
+        
+        await update.message.reply_text(
+            f"✅ *DEMO BUY ORDER EXECUTED*\n"
+            f"🪙 Bought: {amount} {symbol}\n"
+            f"💰 Price: ${price:,.2f}\n"
+            f"💸 Total Cost: ${total_cost:,.2f}\n"
+            f"💵 Remaining Balance: ${new_balance:,.2f}\n"
+            f"📊 Use /portfolio to view holdings"
+        )
+        
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /buy BTC 0.1 30000")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error processing buy order: {str(e)}")
+
+async def sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage: /sell BTC 0.1 32000")
+        return
     
-    # Add all handlers
-    handlers = [
-        CommandHandler("start", start), CommandHandler("help", help_command),
-        CommandHandler("price", price_command), CommandHandler("market", market_command), 
-        CommandHandler("top10", top10_command), CommandHandler("portfolio", portfolio_command),
-        CommandHandler("addholding", addholding_command), CommandHandler("pnl", pnl_command),
-        CommandHandler("alert", alert_command), CommandHandler("alerts", alerts_command),
-        CommandHandler("removealert", removealert_command), CommandHandler("watchlist", watchlist_command),
-        CommandHandler("addwatch", addwatch_command), CommandHandler("removewatch", removewatch_command),
-        CommandHandler("status", status_command), CallbackQueryHandler(callback_handler)
+    try:
+        user_id = update.effective_user.id
+        symbol = context.args[0].upper()
+        amount = float(context.args[1])
+        sell_price = float(context.args[2])
+        
+        portfolio = get_user_portfolio(user_id)
+        
+        if symbol not in portfolio or portfolio[symbol]['amount'] < amount:
+            available = portfolio.get(symbol, {}).get('amount', 0)
+            await update.message.reply_text(
+                f"❌ Insufficient holdings!\n"
+                f"🪙 Available {symbol}: {available}\n"
+                f"📊 Use /portfolio to view holdings"
+            )
+            return
+        
+        # Calculate profit/loss
+        buy_price = portfolio[symbol]['avg_price']
+        total_sale = amount * sell_price
+        cost_basis = amount * buy_price
+        profit_loss = total_sale - cost_basis
+        
+        # Update portfolio
+        old_amount = portfolio[symbol]['amount']
+        new_amount = old_amount - amount
+        
+        if new_amount == 0:
+            # Remove from portfolio if sold all
+            if supabase:
+                supabase.table("user_portfolio").delete().eq("user_id", user_id).eq("symbol", symbol).execute()
+            if user_id in user_data['portfolios'] and symbol in user_data['portfolios'][user_id]:
+                del user_data['portfolios'][user_id][symbol]
+        else:
+            # Update remaining amount
+            if supabase:
+                supabase.table("user_portfolio").update({"amount": new_amount}).eq("user_id", user_id).eq("symbol", symbol).execute()
+            if user_id in user_data['portfolios']:
+                user_data['portfolios'][user_id][symbol]['amount'] = new_amount
+        
+        # Update demo account balance
+        account = get_demo_account(user_id)
+        new_balance = account['balance'] + total_sale
+        update_demo_balance(user_id, new_balance)
+        add_transaction(user_id, 'sell', symbol, amount, sell_price, -total_sale)
+        
+        profit_emoji = "📈" if profit_loss >= 0 else "📉"
+        profit_text = f"+${profit_loss:.2f}" if profit_loss >= 0 else f"-${abs(profit_loss):.2f}"
+        
+        await update.message.reply_text(
+            f"✅ *DEMO SELL ORDER EXECUTED*\n"
+            f"🪙 Sold: {amount} {symbol}\n"
+            f"💰 Sale Price: ${sell_price:,.2f}\n"
+            f"💸 Total Received: ${total_sale:,.2f}\n"
+            f"{profit_emoji} P&L: {profit_text}\n"
+            f"💵 New Balance: ${new_balance:,.2f}\n"
+            f"📊 Use /portfolio to view remaining holdings"
+        )
+        
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /sell BTC 0.1 32000")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error processing sell order: {str(e)}")
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    account = get_demo_account(user_id)
+    portfolio = get_user_portfolio(user_id)
+    
+    if not portfolio:
+        portfolio_value = 0
+        portfolio_text = "No holdings"
+    else:
+        # Get current prices for portfolio valuation
+        prices = await get_crypto_prices(list(portfolio.keys()))
+        portfolio_value = 0
+        portfolio_items = []
+        
+        for symbol, data in portfolio.items():
+            current_price = prices.get(symbol, {}).get('price', 0)
+            holding_value = data['amount'] * current_price
+            portfolio_value += holding_value
+            portfolio_items.append(f"  • {symbol}: {data['amount']} @ ${current_price:,.2f} = ${holding_value:,.2f}")
+        
+        portfolio_text = "\n".join(portfolio_items) if portfolio_items else "No holdings"
+    
+    total_account_value = account['balance'] + portfolio_value
+    total_invested = account.get('total_invested', 0)
+    overall_pnl = total_account_value - 10000  # Assuming $10k starting balance
+    
+    await update.message.reply_text(
+        f"💰 *DEMO ACCOUNT SUMMARY*\n\n"
+        f"💵 Cash Balance: ${account['balance']:,.2f}\n"
+        f"📊 Portfolio Value: ${portfolio_value:,.2f}\n"
+        f"💎 Total Account Value: ${total_account_value:,.2f}\n\n"
+        f"📈 Overall P&L: ${overall_pnl:+,.2f}\n"
+        f"💸 Total Invested: ${total_invested:,.2f}\n\n"
+        f"🪙 *Current Holdings:*\n{portfolio_text}\n\n"
+        f"ℹ This is a demo account with virtual money"
+    )
+
+async def reset_demo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Create confirmation keyboard
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Reset Account", callback_data=f"reset_confirm_{user_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="reset_cancel")]
     ]
     
+    await update.message.reply_text(
+        "⚠ *RESET DEMO ACCOUNT*\n\n"
+        "This will:\n"
+        "• Reset your balance to $10,000\n"
+        "• Clear all holdings\n"
+        "• Archive transaction history\n\n"
+        "Are you sure you want to continue?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def transaction_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    transactions = get_transaction_history(user_id, 15)
+    
+    if not transactions:
+        await update.message.reply_text("📋 No transaction history found.")
+        return
+    
+    msg = "📋 *RECENT TRANSACTIONS* (Last 15)\n\n"
+    
+    for i, tx in enumerate(transactions, 1):
+        tx_type = tx.get('transaction_type', tx.get('type', 'unknown'))
+        symbol = tx['symbol']
+        amount = tx['amount']
+        price = tx['price']
+        total = abs(tx.get('total_cost', amount * price))
+        
+        # Handle timestamp
+        timestamp = tx.get('timestamp')
+        if isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            except:
+                timestamp = datetime.now()
+        elif not timestamp:
+            timestamp = datetime.now()
+        
+        time_str = timestamp.strftime("%m/%d %H:%M")
+        
+        if tx_type.lower() == 'buy':
+            msg += f"{i}. 🟢 BUY {amount} {symbol} @ ${price:,.2f} = ${total:,.2f} [{time_str}]\n"
+        else:
+            msg += f"{i}. 🔴 SELL {amount} {symbol} @ ${price:,.2f} = ${total:,.2f} [{time_str}]\n"
+    
+    msg += "\n💡 Use /balance to see current account status"
+    await update.message.reply_text(msg)
+
+from telegram.ext import CommandHandler
+
+async def pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    portfolio = get_user_portfolio(user_id)
+    account = get_demo_account(user_id)
+    
+    if not portfolio:
+        await update.message.reply_text("Your demo portfolio is empty. Use /buy to start trading!")
+        return
+    
+    prices = await get_crypto_prices(list(portfolio.keys()))
+    msg = "📊 *PORTFOLIO P&L ANALYSIS*\n\n"
+    total_pnl = 0
+    total_value = 0
+    
+    for sym, data in portfolio.items():
+        current_price = prices.get(sym, {}).get('price', 0)
+        avg_price = data['avg_price']
+        amount = data['amount']
+        
+        current_value = current_price * amount
+        cost_basis = avg_price * amount
+        pnl = current_value - cost_basis
+        pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0
+        
+        total_pnl += pnl
+        total_value += current_value
+        
+        pnl_emoji = "📈" if pnl >= 0 else "📉"
+        pnl_text = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        percent_text = f"+{pnl_percent:.1f}%" if pnl_percent >= 0 else f"{pnl_percent:.1f}%"
+        
+        msg += f"🪙 *{sym}*\n"
+        msg += f"  Amount: {amount}\n"
+        msg += f"  Avg Buy: ${avg_price:.2f} → Current: ${current_price:.2f}\n"
+        msg += f"  Value: ${current_value:.2f} | P&L: {pnl_text} ({percent_text})\n\n"
+    
+    overall_pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+    total_pnl_text = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+    
+    msg += f"💰 *TOTALS*\n"
+    msg += f"Portfolio Value: ${total_value:.2f}\n"
+    msg += f"Cash Balance: ${account['balance']:.2f}\n"
+    msg += f"{overall_pnl_emoji} Total P&L: {total_pnl_text}\n\n"
+    msg += f"💡 Use /balance for complete account overview"
+    
+    await update.message.reply_text(msg)
+
+async def post_init(app):
+    """Initialize background tasks after the app starts"""
+    app.create_task(background_alert_scanner(app))
+
+def main():
+    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+
+    handlers = [
+        CommandHandler("start", start),
+        CommandHandler("help", help_command),
+        CommandHandler("balance", balance_command),
+        CommandHandler("buy", buy_command),
+        CommandHandler("sell", sell_command),
+        CommandHandler("portfolio", pnl_command),  # Using pnl_command for portfolio
+        CommandHandler("pnl", pnl_command),
+        CommandHandler("history", transaction_history_command),
+        CommandHandler("resetdemo", reset_demo_command),
+        CommandHandler("topgainers", topgainers_command),
+        CommandHandler("toplosers", toplosers_command),
+        CommandHandler("chart", chart_command),
+        CallbackQueryHandler(callback_handler),
+        MessageHandler(filters.COMMAND, unknown)
+    ]
+
     for handler in handlers:
         app.add_handler(handler)
-    
-    app.add_error_handler(error_handler)
-    
-    print("🚀 Bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+    app.add_error_handler(error_handler)
+    app.run_polling(allowed_updates=["message", "callback_query"])
+
+if __name__ == "_main_":
     main()
