@@ -7,27 +7,46 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
 
+# Load environment variables FIRST
 load_dotenv()
 
+# THEN get the variables
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = [6685099030]
 
+# NOW check if they exist
 if not all([SUPABASE_URL, SUPABASE_KEY, BOT_TOKEN]):
     print("❌ Missing environment variables")
+    print(f"SUPABASE_URL: '{SUPABASE_URL}'")
+    print(f"SUPABASE_KEY: '{SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...'")
+    print(f"BOT_TOKEN: '{BOT_TOKEN[:20] if BOT_TOKEN else 'None'}...'")
     exit(1)
+
+# Debug output
+print("=== DEBUG SUPABASE CONNECTION ===")
+print(f"SUPABASE_URL: '{SUPABASE_URL}'")
+print(f"SUPABASE_KEY length: {len(SUPABASE_KEY)}")
+print(f"SUPABASE_KEY starts with: '{SUPABASE_KEY[:30]}...'")
+print("=================================")
 
 try:
     from supabase import create_client, Client
-    supabase: Client = create_client(SUPABASE_URL.rstrip('/'), SUPABASE_KEY)
-    print("✅ Supabase connected")
+    print("✅ Supabase library imported successfully")
+    
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase client created")
+    
+    # Test a simple operation
+    result = supabase.table("user_sessions").select("count", count="exact").execute()
+    print("✅ Supabase connected and tested successfully")
+    
 except Exception as e:
     print(f"❌ Supabase failed: {e}")
-    supabase = None
-    print("✅ Supabase connected")
-except Exception as e:
-    print(f"❌ Supabase failed: {e}")
+    print(f"❌ Error type: {type(e).__name__}")
+    import traceback
+    traceback.print_exc()
     supabase = None
 
 user_data = {'alerts': {}, 'watchlists': {}, 'portfolios': {}, 'sessions': {}, 'demo_accounts': {}}
