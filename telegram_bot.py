@@ -20,9 +20,11 @@ if not all([SUPABASE_URL, SUPABASE_KEY, BOT_TOKEN]):
 
 try:
     from supabase import create_client, Client
-    if not SUPABASE_URL.startswith(('http://', 'https://')):
-        SUPABASE_URL = 'https://' + SUPABASE_URL
     supabase: Client = create_client(SUPABASE_URL.rstrip('/'), SUPABASE_KEY)
+    print("✅ Supabase connected")
+except Exception as e:
+    print(f"❌ Supabase failed: {e}")
+    supabase = None
     print("✅ Supabase connected")
 except Exception as e:
     print(f"❌ Supabase failed: {e}")
