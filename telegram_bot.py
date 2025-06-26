@@ -31,23 +31,45 @@ print(f"SUPABASE_KEY length: {len(SUPABASE_KEY)}")
 print(f"SUPABASE_KEY starts with: '{SUPABASE_KEY[:30]}...'")
 print("=================================")
 
-try:
-    from supabase import create_client, Client
-    print("✅ Supabase library imported successfully")
+# Skip Supabase client creation - use HTTP requests instead
+supabase = None
+print("⚠️ Using HTTP requests instead of Supabase client due to compatibility issues")
+
+# Helper function for direct HTTP requests to Supabase
+async def supabase_request(method, table, data=None, params=None):
+    """Direct HTTP requests to Supabase REST API"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
     
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("✅ Supabase client created")
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        'apikey': SUPABASE_KEY,
+        'Authorization': f'Bearer {SUPABASE_KEY}',
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+    }
     
-    # Test a simple operation
-    result = supabase.table("user_sessions").select("count", count="exact").execute()
-    print("✅ Supabase connected and tested successfully")
-    
-except Exception as e:
-    print(f"❌ Supabase failed: {e}")
-    print(f"❌ Error type: {type(e).__name__}")
-    import traceback
-    traceback.print_exc()
-    supabase = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            if method.upper() == 'GET':
+                async with session.get(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        return await response.json()
+            elif method.upper() == 'POST':
+                async with session.post(url, headers=headers, json=data) as response:
+                    if response.status in [200, 201]:
+                        return await response.json()
+            elif method.upper() == 'PATCH':
+                async with session.patch(url, headers=headers, json=data, params=params) as response:
+                    if response.status == 200:
+                        return await response.json()
+            elif method.upper() == 'DELETE':
+                async with session.delete(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        return True
+    except Exception as e:
+        print(f"Supabase HTTP request error: {e}")
+    return None
 
 user_data = {'alerts': {}, 'watchlists': {}, 'portfolios': {}, 'sessions': {}, 'demo_accounts': {}}
 
