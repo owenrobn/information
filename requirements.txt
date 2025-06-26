@@ -6,4 +6,5 @@ pymysql
 ccxt
 python-binance
 pycoingecko
-supabase
+supabase>=2.7.0
+httpx>=0.25.0
