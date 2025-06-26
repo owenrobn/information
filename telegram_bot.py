@@ -487,7 +487,7 @@ async def background_alert_scanner(app):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logging.getLogger(_name_).error(f"Error: {context.error}")
+    logging.getLogger(__name__).error(f"Error: {context.error}")
     if isinstance(update, Update) and update.effective_message:
         await update.effective_message.reply_text("⚠ An error occurred.")
 
@@ -756,10 +756,15 @@ async def pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"💡 Use /balance for complete account overview"
     
     await update.message.reply_text(msg)
+    
+async def post_init(application):
+    """Initialize background tasks after application starts"""
+    application.create_task(background_alert_scanner(application))
 
-async def post_init(app):
-    """Initialize background tasks after the app starts"""
-    app.create_task(background_alert_scanner(app))
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    # Remove the create_task line from here
+    await app.run_polling()
 
 def main():
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
