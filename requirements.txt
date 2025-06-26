@@ -6,3 +6,4 @@ pymysql
 ccxt
 python-binance
 pycoingecko
+supabase
