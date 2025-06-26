@@ -766,5 +766,5 @@ def main():
     app.add_error_handler(error_handler)
     app.run_polling(allowed_updates=["message", "callback_query"])
 
-if __name__ == "_main_":
+if __name__ == "__main__":
     main()
