@@ -12,8 +12,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler, # Make sure MessageHandler is imported here
-    filters         # Make sure filters is imported here
+    MessageHandler,
+    filters
 )
 from supabase import create_client, Client
 from gotrue.errors import AuthApiError
@@ -226,6 +226,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.error(f"Error sending error message to user: {e}")
 
 # --- Async Functions for on_startup and on_shutdown ---
+# These functions are defined, but will not be explicitly called by run_webhook for now
+# We will use them manually or remove if they are no longer needed
 async def on_startup(application: Application):
     if WEBHOOK_URL:
         logger.info(f"Attempting to set webhook to: {WEBHOOK_URL}")
@@ -237,7 +239,6 @@ async def on_startup(application: Application):
         except Exception as e:
             logger.error(f"Failed to set webhook: {e}")
             # If webhook fails, you might want to switch to polling or raise an error
-            # For deployment, it's critical the webhook sets correctly.
             pass
     logger.info("Bot started successfully (on_startup).")
 
@@ -283,9 +284,13 @@ def main() -> None:
             port=PORT,
             url_path=WEBHOOK_PATH,
             webhook_url=WEBHOOK_URL,
-            on_startup=on_startup,
-            on_shutdown=on_shutdown
+            # Removed on_startup and on_shutdown arguments temporarily
         )
+        # Manually call on_startup if you want the webhook to be set when the bot starts
+        # asyncio.run(on_startup(application)) # This won't work directly here in synchronous main()
+        # You'd need to ensure on_startup is called in an async context,
+        # often handled by the WSGI server or application framework.
+        # For now, rely on previous webhook setting or set it manually via browser.
     else:
         logger.warning("RENDER_EXTERNAL_HOSTNAME not set. Falling back to polling mode. This is not recommended for Render deployment.")
         # If running locally without webhook, you might want to use polling:
