@@ -55,7 +55,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # --- Conversation States ---
 AWAITING_TRADE_INPUT = 'awaiting_trade_input'
 AWAITING_CHART_INPUT = 'awaiting_chart_input'
-# --- NEW: Conversation States for API Key Management ---
 GET_API_KEY = 'get_api_key'
 GET_API_SECRET = 'get_api_secret'
 
@@ -104,7 +103,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("View Portfolio", callback_data="menu_portfolio")],
         [InlineKeyboardButton("Get Chart", callback_data="menu_chart")],
         [InlineKeyboardButton("Toggle Demo Mode", callback_data="menu_toggle_demo")],
-        # --- NEW BUTTON ---
         [InlineKeyboardButton("🔑 Manage API Keys", callback_data="menu_manage_api_keys")],
         [InlineKeyboardButton("Help", callback_data="menu_help")]
     ]
@@ -182,7 +180,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         mode = "Demo" if user_db_data['is_demo_mode'] else "Live"
         balance = user_db_data['demo_balance_usd'] if user_db_data['is_demo_mode'] else "Connect exchange to see live balance"
 
-        # Fetch demo trades for the user
         demo_trades_response = await supabase.from_('demo_trades').select('*').eq('user_id', user_db_data['id']).order('timestamp', desc=True).limit(5).execute()
         demo_trades = demo_trades_response.data
 
@@ -225,7 +222,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     [InlineKeyboardButton("View Portfolio", callback_data="menu_portfolio")],
                     [InlineKeyboardButton("Get Chart", callback_data="menu_chart")],
                     [InlineKeyboardButton("Toggle Demo Mode", callback_data="menu_toggle_demo")],
-                    # --- NEW BUTTON ---
                     [InlineKeyboardButton("🔑 Manage API Keys", callback_data="menu_manage_api_keys")],
                     [InlineKeyboardButton("Help", callback_data="menu_help")]
                 ])
@@ -245,7 +241,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         context.user_data['state'] = AWAITING_CHART_INPUT
 
-    # --- NEW: Handle Manage API Keys Callback ---
     elif query.data == "menu_manage_api_keys":
         await query.edit_message_text(
             "Please select which API keys you'd like to manage:",
@@ -254,17 +249,12 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main_menu")]
             ])
         )
-    # --- NEW: Handle Bybit Testnet API Management START ---
     elif query.data == "manage_bybit_testnet_api":
-        # This will be the entry point for the ConversationHandler for API key input
-        # We start the conversation here by sending the first prompt.
-        
         user_db_data = await get_or_create_user(user_tg_id)
         text_message = "Alright, let's set up your Bybit Testnet API keys.\n\n" \
                        "Please send me your **Bybit Testnet API Key**.\n\n" \
                        "You can get this from your Bybit Testnet account settings (API Management section)."
         
-        # Check if keys already exist
         current_key = user_db_data.get('bybit_testnet_api_key')
         if current_key:
             text_message += "\n\n**Current API Key detected. Entering a new one will overwrite it.**"
@@ -273,14 +263,11 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             text_message,
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_api_input_conv")] # IMPORTANT: New callback for ConversationHandler cancel
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_api_input_conv")]
             ])
         )
-        # It's crucial for ConversationHandler that the starting point returns the next state.
-        # However, for a CallbackQueryHandler, we just set context.user_data['state']
-        # and the ConversationHandler itself is responsible for state transition.
         context.user_data['state'] = GET_API_KEY
-        return GET_API_KEY # This return is important for ConversationHandler
+        return GET_API_KEY
 
     elif query.data == "menu_help":
         await query.edit_message_text(
@@ -297,8 +284,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             ])
         )
     elif query.data == "back_to_main_menu":
-        await start(update, context) # This will edit the current message to the start menu
-
+        await start(update, context)
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles text input based on the current user state."""
@@ -308,7 +294,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await process_trade_input(update, context)
     elif user_state == AWAITING_CHART_INPUT:
         await process_chart_input(update, context)
-    # --- NEW: Handle API Key input states ---
     elif user_state == GET_API_KEY:
         await receive_api_key(update, context)
     elif user_state == GET_API_SECRET:
@@ -338,7 +323,7 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if len(parts) == 1:
         pair = parts[0]
-        quantity = None # Default quantity will be derived
+        quantity = None
     elif len(parts) == 2:
         pair = parts[0]
         try:
@@ -352,7 +337,6 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Invalid trade format. Please use `PAIR/QUOTE QUANTITY` (e.g., `BTC/USDT 0.001`) or just `PAIR/QUOTE` (e.g., `BTC/USDT`).")
         return
 
-    # Basic validation for pair format
     if '/' not in pair or len(pair.split('/')) != 2:
         await update.message.reply_text("Invalid trading pair format. Please use `BASE/QUOTE` (e.g., `BTC/USDT`).")
         return
@@ -362,11 +346,10 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         exchange = exchange_class({
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'spot', # Or 'future' for perpetuals
+                'defaultType': 'spot',
             }
         })
         
-        # Load markets to check if pair exists and get its info
         await exchange.load_markets()
         if pair not in exchange.markets:
             await update.message.reply_text(f"Trading pair {pair} not found on {selected_exchange}. Please check the symbol.")
@@ -376,12 +359,10 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         base = market['base']
         quote = market['quote']
 
-        # Fetch current price for calculation
         ticker = await exchange.fetch_ticker(pair)
         current_price = ticker['last']
 
         if quantity is None:
-            # Default quantity: e.g., 50 USDT worth of base currency for demo
             default_quote_amount = 50.00
             quantity = default_quote_amount / current_price
             await update.message.reply_text(f"No quantity specified. Defaulting to ${default_quote_amount:.2f} worth of {base} (approx. {quantity:.4f} {base}).")
@@ -401,7 +382,6 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             update_response = await update_user_demo_balance(user_db_data['id'], new_balance)
 
             if update_response:
-                # Record demo trade
                 await supabase.from_('demo_trades').insert({
                     'user_id': user_db_data['id'],
                     'pair': pair,
@@ -425,7 +405,6 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await update.message.reply_text("Failed to process demo trade. Please try again.")
 
         else:
-            # This is where live trading logic will go in Phase 2+
             await update.message.reply_text(
                 "You are in **Live Mode**. Live trading is not yet fully implemented for real exchanges.\n"
                 "Please connect your Bybit API keys to use testnet trading or toggle to Demo Mode for simulated trades.",
@@ -434,7 +413,7 @@ async def process_trade_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                     [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main_menu")]
                 ])
             )
-        context.user_data['state'] = None # Reset state after processing
+        context.user_data['state'] = None
     except ccxt.ExchangeError as e:
         logger.error(f"CCXT Exchange Error: {e}")
         await update.message.reply_text(f"Exchange error: {e}. Please check the pair or try again later.")
@@ -454,20 +433,18 @@ async def process_chart_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     pair = parts[0]
-    timeframe = parts[1].lower() # Ensure timeframe is lowercase for consistency
+    timeframe = parts[1].lower()
 
     supported_timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
     if timeframe not in supported_timeframes:
         await update.message.reply_text(f"Unsupported timeframe: `{timeframe}`. Please use one of: {', '.join(supported_timeframes)}.")
         return
 
-    # Basic validation for pair format
     if '/' not in pair or len(pair.split('/')) != 2:
         await update.message.reply_text("Invalid trading pair format. Please use `BASE/QUOTE` (e.g., `BTC/USDT`).")
         return
 
     try:
-        # Using Bybit for charting as an example, could be dynamic later
         exchange = ccxt.bybit({
             'enableRateLimit': True,
             'options': {
@@ -488,16 +465,14 @@ async def process_chart_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
 
-        # Plotting with mplfinance
         fig, axlist = mpf.plot(df, type='candle', style='yahoo', title=f"{pair} {timeframe} Chart",
-                               volume=True, mav=(20,50),  # Example moving averages
+                               volume=True, mav=(20,50),
                                figscale=1.5,
-                               returnfig=True) # Return figure object to save
+                               returnfig=True)
 
-        # Save plot to a bytes buffer
         buf = io.BytesIO()
         fig.savefig(buf, format='png', bbox_inches='tight')
-        buf.seek(0) # Rewind the buffer to the beginning
+        buf.seek(0)
 
         await update.message.reply_photo(
             photo=buf,
@@ -506,10 +481,10 @@ async def process_chart_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main_menu")]
             ])
         )
-        plt.close(fig) # Close the figure to free memory
-        buf.close() # Close the buffer
+        plt.close(fig)
+        buf.close()
 
-        context.user_data['state'] = None # Reset state after processing
+        context.user_data['state'] = None
 
     except ccxt.ExchangeError as e:
         logger.error(f"CCXT Exchange Error: {e}")
@@ -520,11 +495,7 @@ async def process_chart_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"An unexpected error occurred: {e}. Please try again.")
         context.user_data['state'] = None
 
-# --- NEW: API Key Conversation Handlers ---
-
-# State entry point: This is called after 'manage_bybit_testnet_api' callback
-# The actual handling is integrated into handle_menu_callback as an elif
-# This function is now just a placeholder for the actual text input handler.
+# --- API Key Conversation Handlers ---
 async def receive_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives the API Key and asks for the Secret."""
     user_api_key = update.message.text.strip()
@@ -537,13 +508,13 @@ async def receive_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_api_input_conv")]
         ])
     )
-    context.user_data['state'] = GET_API_SECRET # Transition to next state
-    return GET_API_SECRET # Return state for ConversationHandler
+    context.user_data['state'] = GET_API_SECRET
+    return GET_API_SECRET
 
 async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives the API Secret, saves both to Supabase, and ends the conversation."""
     user_api_secret = update.message.text.strip()
-    user_api_key = context.user_data.pop('temp_api_key', None) # Get key and clear it
+    user_api_key = context.user_data.pop('temp_api_key', None)
 
     if not user_api_key:
         await update.message.reply_text(
@@ -553,7 +524,7 @@ async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ])
         )
         context.user_data.clear()
-        return ConversationHandler.END # End the conversation
+        return ConversationHandler.END
 
     user_tg_id = update.effective_user.id
     user_db_data = await get_or_create_user(user_tg_id)
@@ -593,8 +564,8 @@ async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ])
         )
 
-    context.user_data.clear() # Clear all user_data after conversation ends
-    return ConversationHandler.END # End the conversation
+    context.user_data.clear()
+    return ConversationHandler.END
 
 async def cancel_api_input_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels the API key input conversation."""
@@ -607,8 +578,8 @@ async def cancel_api_input_conv(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main_menu")]
         ])
     )
-    context.user_data.clear() # Clear conversation data
-    return ConversationHandler.END # End the conversation
+    context.user_data.clear()
+    return ConversationHandler.END
 
 # --- Main function to run the bot ---
 def main() -> None:
@@ -618,16 +589,42 @@ def main() -> None:
         return
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    logger.info("Bot started polling...")
+
+    # --- NEW: Webhook configuration for Render ---
+    # Render provides the PORT environment variable for Web Services
+    port = int(os.environ.get("PORT", 8000)) # Default to 8000 if not set locally
+    
+    # Render provides the RENDER_EXTERNAL_HOSTNAME for Web Services
+    # This is the public URL of your deployed service
+    render_external_hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+    if render_external_hostname:
+        # A secret path for Telegram to send updates to
+        WEBHOOK_PATH = f"/webhook/{TELEGRAM_BOT_TOKEN}" # Using token for unique, hard-to-guess path
+        WEBHOOK_URL = f"https://{render_external_hostname}{WEBHOOK_PATH}"
+        
+        logger.info(f"Configuring bot for webhook mode.")
+        logger.info(f"Listening on 0.0.0.0:{port} with URL path: {WEBHOOK_PATH}")
+        logger.info(f"Telegram Webhook URL: {WEBHOOK_URL}")
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=WEBHOOK_PATH,
+            webhook_url=WEBHOOK_URL
+        )
+    else:
+        # Fallback to polling for local development if RENDER_EXTERNAL_HOSTNAME is not set
+        logger.info("RENDER_EXTERNAL_HOSTNAME not found. Running bot in polling mode for local development.")
+        application.run_polling() # This will block until stopped
+
+    logger.info("Application started")
 
     # --- Command Handlers ---
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", handle_menu_callback)) # Direct /help to the menu handler
-    # Add other direct commands if desired, e.g., /trade, /portfolio
+    application.add_handler(CommandHandler("help", handle_menu_callback))
 
     # --- Conversation Handler for API Key Input ---
-    # The entry point can be a CallbackQueryHandler (e.g., from a menu button)
-    # or a CommandHandler. Here, it starts from a callback.
     api_key_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(handle_menu_callback, pattern='^manage_bybit_testnet_api$')
@@ -638,28 +635,18 @@ def main() -> None:
         },
         fallbacks=[
             CallbackQueryHandler(cancel_api_input_conv, pattern='^cancel_api_input_conv$'),
-            CommandHandler("cancel", cancel_api_input_conv) # Also allow /cancel
+            CommandHandler("cancel", cancel_api_input_conv)
         ],
-        allow_reentry=True # Allow restarting the conversation if already in it
+        allow_reentry=True
     )
     application.add_handler(api_key_conv_handler)
 
-
     # --- Callback Query Handler (for all other inline keyboard buttons) ---
-    # This handler must be added AFTER ConversationHandler for patterns that overlap
-    # The ConversationHandler's pattern 'manage_bybit_testnet_api' will take precedence
-    # for that specific callback.
     application.add_handler(CallbackQueryHandler(handle_menu_callback))
 
-
     # --- Message Handler (for text input) ---
-    # This handler needs to be aware of the current 'state' set in context.user_data
-    # It must also come AFTER the ConversationHandler's MessageHandlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
-
-    # --- Run the bot ---
-    application.run_polling()
 
 if __name__ == '__main__':
     main()
