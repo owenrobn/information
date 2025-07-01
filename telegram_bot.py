@@ -12,8 +12,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
-    filters
+    MessageHandler, # Make sure MessageHandler is imported here
+    filters         # Make sure filters is imported here
 )
 from supabase import create_client, Client
 from gotrue.errors import AuthApiError
@@ -108,6 +108,13 @@ async def get_or_create_user(telegram_id: int, username: str):
     except Exception as e:
         logger.error(f"Error getting or creating user: {e}")
         return None
+
+# --- NEW: Aggressive Logging Handler (MUST BE DEFINED BEFORE main()) ---
+def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs all incoming updates."""
+    logger.info(f"Received update from user {update.effective_user.id}: {update.update_id}")
+    # For deeper debugging, you could uncomment the line below, but be cautious with sensitive info in logs
+    # logger.debug(f"Full update object: {update.to_dict()}")
 
 # --- Command Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
